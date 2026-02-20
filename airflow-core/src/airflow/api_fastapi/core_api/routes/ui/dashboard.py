@@ -19,7 +19,7 @@ from __future__ import annotations
 from typing import cast
 
 from fastapi import Depends, status
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.sql.expression import case, false
 
 from airflow._shared.timezones import timezone
@@ -59,9 +59,17 @@ def historical_metrics(
     current_time = timezone.utcnow()
     permitted_dag_ids = cast("set[str]", readable_dags_filter.value)
 
+    effective_end = end_date if end_date is not None else current_time
+
+    # Use OR / IS NULL instead of COALESCE so the predicates remain SARGable
+    # (allows the database to use indexes on start_date / end_date).
+    # NULL start_date → run not yet started, include it (same as original COALESCE logic).
+    # NULL end_date → run still in progress, include only if current_time <= effective_end.
     dag_run_date_filter = (
-        func.coalesce(DagRun.start_date, current_time) >= start_date,
-        func.coalesce(DagRun.end_date, current_time) <= func.coalesce(end_date, current_time),
+        or_(DagRun.start_date >= start_date, DagRun.start_date.is_(None)),
+        or_(DagRun.end_date <= effective_end, DagRun.end_date.is_(None))
+        if current_time <= effective_end
+        else (DagRun.end_date <= effective_end),
     )
 
     # DagRuns: combine run_type and state counts into a single query
